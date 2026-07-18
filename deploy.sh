@@ -2,7 +2,7 @@
 
 # ============================================================
 # 🍂 Leef Deploy - Direct Cloudflare API
-# No Wrangler needed! Downloads worker code from GitHub
+# Token-only authentication (no email needed)
 # ============================================================
 
 RED='\033[0;31m'
@@ -16,42 +16,51 @@ clear
 echo -e "${BLUE}${BOLD}"
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║                                                          ║"
-echo "║        🍂 LEEF DEPLOY - DIRECT API v2.0                 ║"
+echo "║        🍂 LEEF DEPLOY - TOKEN ONLY v3.0                 ║"
 echo "║                                                          ║"
-echo "║     Downloads worker code from GitHub repository         ║"
+echo "║     Deploy to Cloudflare Workers with API Token only     ║"
 echo "║                                                          ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
 # ============================================================
-# GET CREDENTIALS
+# GET API TOKEN (NO EMAIL REQUIRED)
 # ============================================================
 
-echo -e "\n${YELLOW}Enter your Cloudflare credentials:${NC}"
-echo -e "${YELLOW}(Get API Token: https://dash.cloudflare.com/profile/api-tokens)${NC}"
+echo -e "\n${YELLOW}Enter your Cloudflare API Token:${NC}"
+echo -e "${YELLOW}(Get token from: https://dash.cloudflare.com/profile/api-tokens)${NC}"
 echo -e "${YELLOW}Token needs: Workers Scripts:Edit, Account Settings:Read${NC}\n"
 
-read -p "Cloudflare Email: " CF_EMAIL
-read -sp "Cloudflare API Token: " CF_API_TOKEN
+read -sp "API Token: " CF_API_TOKEN
 echo ""
 
-if [ -z "$CF_EMAIL" ] || [ -z "$CF_API_TOKEN" ]; then
-    echo -e "${RED}✗ Email and Token are required${NC}"
+if [ -z "$CF_API_TOKEN" ]; then
+    echo -e "${RED}✗ API Token is required${NC}"
     exit 1
 fi
 
 # ============================================================
-# VERIFY & GET ACCOUNT ID
+# VERIFY TOKEN & GET ACCOUNT ID
 # ============================================================
 
-echo -e "\n${GREEN}▶${NC} Verifying credentials..."
+echo -e "\n${GREEN}▶${NC} Verifying token..."
 
-ACCOUNT_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user" \
+# Get Account ID from token
+ACCOUNT_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
     -H "Authorization: Bearer $CF_API_TOKEN" \
-    -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    -H "Content-Type: application/json")
+
+# Check if token is valid
+if echo "$ACCOUNT_RESPONSE" | grep -q '"success":false'; then
+    echo -e "${RED}✗ Invalid API Token. Please check and try again.${NC}"
+    exit 1
+fi
+
+# Extract first account ID
+ACCOUNT_ID=$(echo "$ACCOUNT_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$ACCOUNT_ID" ]; then
-    echo -e "${RED}✗ Authentication failed. Check your API Token.${NC}"
+    echo -e "${RED}✗ Could not fetch Account ID. Check token permissions.${NC}"
     exit 1
 fi
 
@@ -77,26 +86,24 @@ echo ""
 [ -z "$MASTER_KEY" ] && MASTER_KEY="admin123"
 
 # ============================================================
-# DOWNLOAD WORKER CODE FROM GITHUB
+# DOWNLOAD OR GENERATE WORKER CODE
 # ============================================================
 
-echo -e "\n${GREEN}▶${NC} Downloading worker code from GitHub..."
+echo -e "\n${GREEN}▶${NC} Preparing worker code..."
 
-# Try to download from repository
+# Try to download from GitHub
 REPO_URL="https://raw.githubusercontent.com/lavateam-IR/leef-panel/main/_worker.js"
-WORKER_CODE=$(curl -sSL "$REPO_URL" 2>/dev/null)
+WORKER_RAW=$(curl -sSL "$REPO_URL" 2>/dev/null)
 
-if [ -z "$WORKER_CODE" ] || echo "$WORKER_CODE" | grep -q "404: Not Found"; then
-    echo -e "${YELLOW}⚠${NC} _worker.js not found in repository"
-    echo -e "${YELLOW}⚠${NC} Using built-in fallback code..."
+if [ -z "$WORKER_RAW" ] || echo "$WORKER_RAW" | grep -q "404: Not Found"; then
+    echo -e "${YELLOW}⚠${NC} _worker.js not found in repository, using built-in code..."
     
-    # Fallback: Generate minimal worker
-    cat > _worker.js << 'EOF'
-// ============================================================
-// 🍂leef - Cloudflare Worker Panel (Fallback)
+    # Built-in worker code
+    WORKER_RAW='// ============================================================
+// 🍂leef - Cloudflare Worker Panel (Built-in)
 // ============================================================
 
-function generateLoginHTML() {
+function getLoginHTML(route) {
     return `
 <!DOCTYPE html>
 <html>
@@ -167,22 +174,22 @@ function generateLoginHTML() {
     <script>
         async function authenticate(e) {
             e.preventDefault();
-            const key = document.getElementById('masterKey').value;
+            const key = document.getElementById("masterKey").value;
             try {
-                const res = await fetch('/api/auth', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                const res = await fetch("/api/auth", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ key })
                 });
                 if (res.ok) {
                     const data = await res.json();
-                    document.cookie = 'auth=' + data.token + ';path=/;max-age=86400';
-                    window.location.href = '/API_ROUTE_PLACEHOLDER/dashboard';
+                    document.cookie = "auth=" + data.token + ";path=/;max-age=86400";
+                    window.location.href = "/${route}/dashboard";
                 } else {
-                    document.getElementById('error').style.display = 'block';
+                    document.getElementById("error").style.display = "block";
                 }
             } catch(e) {
-                document.getElementById('error').style.display = 'block';
+                document.getElementById("error").style.display = "block";
             }
         }
     </script>
@@ -191,7 +198,7 @@ function generateLoginHTML() {
     `;
 }
 
-function generateDashboardHTML(panelName, workerName, route) {
+function getDashboardHTML(panelName, workerName, route) {
     return `
 <!DOCTYPE html>
 <html>
@@ -243,14 +250,15 @@ function generateDashboardHTML(panelName, workerName, route) {
             gap: 20px;
         }
         @media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } }
-        .badge {
+        .badge-online {
             display: inline-block;
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 12px;
             font-weight: 600;
+            background: #dcfce7;
+            color: #166534;
         }
-        .badge-online { background: #dcfce7; color: #166534; }
         input, select {
             width: 100%;
             padding: 10px;
@@ -259,7 +267,6 @@ function generateDashboardHTML(panelName, workerName, route) {
             margin-bottom: 10px;
         }
         .flex { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-        .mt-10 { margin-top: 10px; }
         .text-gray { color: #6b7280; font-size: 14px; }
     </style>
 </head>
@@ -268,7 +275,7 @@ function generateDashboardHTML(panelName, workerName, route) {
         <div class="header">
             <h1>🍂 ${panelName}</h1>
             <div>
-                <span class="badge badge-online">● Active</span>
+                <span class="badge-online">● Active</span>
                 <button class="btn btn-white" onclick="logout()">Logout</button>
             </div>
         </div>
@@ -312,27 +319,27 @@ function generateDashboardHTML(panelName, workerName, route) {
     </div>
     <script>
         async function copyLink() {
-            const link = document.getElementById('subLink').value;
+            const link = document.getElementById("subLink").value;
             await navigator.clipboard.writeText(link);
-            alert('Copied!');
+            alert("Copied!");
         }
         function logout() {
-            document.cookie = 'auth=;path=/;max-age=0';
-            window.location.href = '/${route}/dash';
+            document.cookie = "auth=;path=/;max-age=0";
+            window.location.href = "/${route}/dash";
         }
         async function updateSettings(e) {
             e.preventDefault();
             const data = {
-                protocol: document.getElementById('protocol').value,
-                cleanIPs: document.getElementById('cleanIPs').value.split(',').map(s => s.trim())
+                protocol: document.getElementById("protocol").value,
+                cleanIPs: document.getElementById("cleanIPs").value.split(",").map(s => s.trim())
             };
-            const res = await fetch('/api/config', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+            const res = await fetch("/api/config", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(data)
             });
-            if (res.ok) alert('Settings updated!');
-            else alert('Update failed!');
+            if (res.ok) alert("Settings updated!");
+            else alert("Update failed!");
         }
     </script>
 </body>
@@ -344,91 +351,75 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url);
         const path = url.pathname;
-        const ROUTE = 'API_ROUTE_PLACEHOLDER';
-        const KEY = 'MASTER_KEY_PLACEHOLDER';
-        const PANEL = 'PANEL_NAME_PLACEHOLDER';
-        const WORKER = 'WORKER_NAME_PLACEHOLDER';
+        const ROUTE = "API_ROUTE_PLACEHOLDER";
+        const KEY = "MASTER_KEY_PLACEHOLDER";
+        const PANEL = "PANEL_NAME_PLACEHOLDER";
+        const WORKER = "WORKER_NAME_PLACEHOLDER";
 
-        // Login page
-        if (path === '/' || path === `/${ROUTE}/dash`) {
-            return new Response(generateLoginHTML(), {
-                headers: { 'Content-Type': 'text/html;charset=utf-8' }
+        if (path === "/" || path === `/${ROUTE}/dash`) {
+            return new Response(getLoginHTML(ROUTE), {
+                headers: { "Content-Type": "text/html;charset=utf-8" }
             });
         }
 
-        // Auth API
-        if (path === '/api/auth' && request.method === 'POST') {
+        if (path === "/api/auth" && request.method === "POST") {
             const data = await request.json();
             if (data.key === KEY) {
                 return new Response(JSON.stringify({ 
                     success: true, 
-                    token: btoa(Date.now() + ':' + Math.random())
+                    token: btoa(Date.now() + ":" + Math.random())
                 }), {
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { "Content-Type": "application/json" }
                 });
             }
             return new Response(JSON.stringify({ success: false }), { status: 401 });
         }
 
-        // Dashboard
         if (path === `/${ROUTE}/dashboard`) {
-            const cookies = request.headers.get('Cookie') || '';
-            if (!cookies.includes('auth=')) {
+            const cookies = request.headers.get("Cookie") || "";
+            if (!cookies.includes("auth=")) {
                 return Response.redirect(`/${ROUTE}/dash`, 302);
             }
-            return new Response(generateDashboardHTML(PANEL, WORKER, ROUTE), {
-                headers: { 'Content-Type': 'text/html;charset=utf-8' }
+            return new Response(getDashboardHTML(PANEL, WORKER, ROUTE), {
+                headers: { "Content-Type": "text/html;charset=utf-8" }
             });
         }
 
-        // Subscription
         if (path === `/${ROUTE}/sub`) {
-            const uuid = url.searchParams.get('sub') || 'default-uuid';
+            const uuid = url.searchParams.get("sub") || "default-uuid";
             return new Response(
                 `vless://${uuid}@1.1.1.1:443?security=tls&sni=gateway.leef.workers.dev#Leef`,
-                { headers: { 'Content-Type': 'text/plain' } }
+                { headers: { "Content-Type": "text/plain" } }
             );
         }
 
-        // Update config
-        if (path === '/api/config' && request.method === 'PUT') {
+        if (path === "/api/config" && request.method === "PUT") {
             try {
-                const data = await request.json();
+                await request.json();
                 return new Response(JSON.stringify({ success: true }), {
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { "Content-Type": "application/json" }
                 });
             } catch(e) {
                 return new Response(JSON.stringify({ error: e.message }), { status: 400 });
             }
         }
 
-        // Camouflage
-        return new Response('', {
+        return new Response("", {
             status: 302,
-            headers: { 'Location': 'https://ubuntu.com' }
+            headers: { "Location": "https://ubuntu.com" }
         });
     }
 };
-EOF
-    
-    WORKER_CODE=$(cat _worker.js)
-else
-    echo -e "${GREEN}✓${NC} Worker code downloaded from repository"
+'
 fi
 
-# ============================================================
-# REPLACE PLACEHOLDERS
-# ============================================================
-
-echo -e "\n${GREEN}▶${NC} Configuring worker with your settings..."
-
-# Replace placeholders in the worker code
-WORKER_CODE=$(echo "$WORKER_CODE" | sed "s/MASTER_KEY_PLACEHOLDER/$MASTER_KEY/g")
+# Replace placeholders
+WORKER_CODE=$(echo "$WORKER_RAW" | sed "s/MASTER_KEY_PLACEHOLDER/$MASTER_KEY/g")
 WORKER_CODE=$(echo "$WORKER_CODE" | sed "s/PANEL_NAME_PLACEHOLDER/$PANEL_NAME/g")
 WORKER_CODE=$(echo "$WORKER_CODE" | sed "s/WORKER_NAME_PLACEHOLDER/$WORKER_NAME/g")
 WORKER_CODE=$(echo "$WORKER_CODE" | sed "s|API_ROUTE_PLACEHOLDER|$API_ROUTE|g")
 
-echo -e "${GREEN}✓${NC} Configuration complete"
+echo -e "${GREEN}✓${NC} Worker code ready"
 
 # ============================================================
 # DEPLOY VIA API
@@ -436,7 +427,6 @@ echo -e "${GREEN}✓${NC} Configuration complete"
 
 echo -e "\n${GREEN}▶${NC} Deploying to Cloudflare..."
 
-# Deploy using Cloudflare API
 DEPLOY_RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/scripts/$WORKER_NAME" \
     -H "Authorization: Bearer $CF_API_TOKEN" \
     -H "Content-Type: application/javascript" \
@@ -469,13 +459,10 @@ echo -e "${NC}"
 echo -e "\n${GREEN}${BOLD}📋 Your Leef Panel Details:${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "\n${GREEN}▶${NC} Panel Name: ${BOLD}$PANEL_NAME${NC}"
-echo -e "${GREEN}▶${NC} Worker Name: ${BOLD}$WORKER_NAME${NC}"
 echo -e "${GREEN}▶${NC} Dashboard URL: ${YELLOW}https://$WORKER_NAME.workers.dev/$API_ROUTE/dash${NC}"
 echo -e "${GREEN}▶${NC} Subscription URL: ${YELLOW}https://$WORKER_NAME.workers.dev/$API_ROUTE/sub${NC}"
-echo -e "${GREEN}▶${NC} Master Key: ${YELLOW}$MASTER_KEY${NC} ${RED}(Save this!)${NC}"
+echo -e "${GREEN}▶${NC} Master Key: ${YELLOW}$MASTER_KEY${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "\n${YELLOW}Access your panel at: https://$WORKER_NAME.workers.dev/$API_ROUTE/dash${NC}"
-echo -e "${GREEN}Login with master key: $MASTER_KEY${NC}\n"
 
 # Save info
 cat > leef_info.txt << EOF
@@ -487,9 +474,8 @@ Subscription: https://$WORKER_NAME.workers.dev/$API_ROUTE/sub
 Master Key: $MASTER_KEY
 Panel Name: $PANEL_NAME
 Worker Name: $WORKER_NAME
-API Route: $API_ROUTE
 =============================================
 EOF
 
-echo -e "${GREEN}✓${NC} Info saved to leef_info.txt"
+echo -e "\n${GREEN}✓${NC} Info saved to leef_info.txt"
 echo -e "\n${GREEN}${BOLD}Thank you! 🍂${NC}\n"
